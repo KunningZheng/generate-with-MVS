@@ -102,7 +102,7 @@ def visualize_camera_distribution(camerasInfo, nonoverlap_ids, near_image_ids, o
 
 def main():
     ####################################### 参数 #######################################
-    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/group611_800z"
+    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/"
     image_scale = 1
     overlap_percentile = 50       # 自动阈值分位数,可以简单理解为取前%为重叠航片
     area_ratio_th = 0.5           # 面积重叠比例阈值
@@ -112,7 +112,10 @@ def main():
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')
     output_path = os.path.join(workspace, 'intermediate_results')
+    depthmap_orginal_path = "/media/rylynn/data/Dublin/block2/dense/stereo/depth_maps/"
+    depthmap_path = os.path.join(workspace, 'depth_maps')
     os.makedirs(output_path, exist_ok=True)
+    os.makedirs(depthmap_path, exist_ok=True)
 
     ####################################### Step 1: 加载稀疏模型 #######################################
     camerasInfo, points_in_images = load_sparse_model(sparse_model_path, image_scale)
@@ -157,6 +160,9 @@ def main():
                 near_images.append(int(img2_id))
         near_image_ids[img1_id] = near_images
 
+    # 剔除少于3张邻近航片的航片
+    near_image_ids = {k:v for k,v in near_image_ids.items() if len(v) > 3}
+
     ####################################### Step 5: 保存结果 #######################################
     json_path = os.path.join(output_path, f"near_image_ids_{match_point_num}.json")
     with open(json_path, 'w') as f:
@@ -168,6 +174,24 @@ def main():
 
     print(f"[STATS] Avg. neighbors per image: {np.mean([len(v) for v in near_image_ids.values()]):.2f}")
 
+    ####################################### Step 7: 拷贝需要的depthmap到路径中 #######################################
+    # 统计需要深度图的航片
+    images_depth = set()
+    for id, near_images in near_image_ids.items():
+        images_depth.add(id)
+        for iid in near_images:
+            images_depth.add(iid)
+    # 拷贝深度图到路径
+    for cam_id in tqdm(images_depth):
+        cam_dict = camerasInfo[cam_id]
+        depth_path = os.path.join(depthmap_orginal_path, cam_dict['img_name']+'.jpg.geometric.bin')
+        new_depth_path = os.path.join(depthmap_path, cam_dict['img_name']+'.jpg.geometric.bin')
+        # 拷贝文件从depth_path到new_depth_path
+        if os.path.exists(depth_path):
+            os.makedirs(os.path.dirname(new_depth_path), exist_ok=True)
+            if not os.path.exists(new_depth_path):
+                os.system(f'cp "{depth_path}" "{new_depth_path}"')
+    print(f"[INFO] Copied required depth maps to {depthmap_path}")
 
 if __name__ == "__main__":
     main()
