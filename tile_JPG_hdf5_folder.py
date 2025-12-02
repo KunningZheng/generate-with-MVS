@@ -75,6 +75,6 @@ def split_and_save_hdf5_jpg(folder_path, output_path, patch_size=(1200, 800), ov
         print(f"Processed {jpg_file} and {hdf5_file}, saved {patch_index} patches.")
 
 # 示例用法
-folder_path = "/root/autodl-tmp/our_gt/group611_800z"  # 输入文件夹路径
-output_path = "/root/autodl-tmp/our_gt/group611_800z_patches"  # 输出文件夹路径
+folder_path = "/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/gt/"  # 输入文件夹路径
+output_path = "/media/rylynn/data/Dublin/block2/gt_patches/"  # 输出文件夹路径
 split_and_save_hdf5_jpg(folder_path, output_path, patch_size=(1024, 1024), overlap=0.2)
