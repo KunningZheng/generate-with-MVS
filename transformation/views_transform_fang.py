@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from pytlsd import lsd
 from deeplsd.geometry.line_utils import clip_line_to_boundaries
 from deeplsd.geometry.viz_2d import get_flow_vis, plot_images, plot_lines, save_plot
+from deeplsd.datasets.utils.homographies import sample_homography, warp_lines, warp_points
 
 from datasets.dataset_reader import read_cam_dict
 from utils.visualize import viz_lines3D, viz_points2
@@ -15,7 +16,7 @@ from utils.visualize import viz_lines2D2 as viz
 from utils.line_tools import clip_lines_to_image, rasterize_lines
 
 
-def bilinear_interpolate(depthmap, x, y, scale):
+def bilinear_interpolate(depthmap, x, y, scale=[1,1]):
     '''
     双线形插值，另外约束参与计算的整数坐标对应的深度应都不为0，否则输出0
     - 输入
@@ -28,8 +29,8 @@ def bilinear_interpolate(depthmap, x, y, scale):
     '''
 
     
-    x = np.asarray(x) * scale
-    y = np.asarray(y) * scale
+    x = np.asarray(x) * scale[0]
+    y = np.asarray(y) * scale[1]
     
     x0 = np.floor(x).astype(int)
     x1 = x0 + 1
@@ -359,14 +360,14 @@ def interpolate_line_segments(line_segments, num_points=5):
 
 def views_transform_lsd(img, depth, cam_dict, nimg, ndepth, ncam_dict):
     '''
-    邻近视角(包括当前视角)分别进行LSD+反变换，然后投影到当前视角，用深度突变边界剔除
+    邻近视角(包括当前视角)分别进行LSD，然后投影到当前视角，用深度突变边界剔除
     '''
     ################################ LSD ################################
     h, w = nimg.shape[:2]
     nimage_lines = lsd(nimg)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
     # Clip lines to image（LSD算法的线段延长特性导致线段端点超出范围）
-    nimage_lines = clip_lines_to_image(nimage_lines, h, w)
-
+    nimage_lines, valid = clip_line_to_boundaries(nimage_lines, nimg.shape, min_len=0)
+    nimage_lines = nimage_lines[valid]
 
     ############################## 投影到当前视角 ##############################
     # 如果为当前视角，那就无需投影，直接返回lines
@@ -415,3 +416,203 @@ def views_transform_lsd(img, depth, cam_dict, nimg, ndepth, ncam_dict):
         image_lines = new_lines[valid]         
         
         return image_lines    
+
+
+def views_transform(img, nimage_lines, cam_dict, nimg, ndepth, ncam_dict):
+    '''
+    邻近视角投影到当前视角，用深度突变边界剔除
+    '''
+    # 如果为当前视角，那就无需投影，直接返回lines
+    if cam_dict['img_name'] == ncam_dict['img_name']:
+        return nimage_lines
+    ## 1.在线段中插入5个点
+    nimage_pts = interpolate_line_segments(nimage_lines, num_points=5)
+    # test:可视化
+    #from visualize.visualize import visualize_point_line_image
+    #visualize_point_line_image(nimg, nimage_lines, nimage_pts)
+
+    ## 2.赋值深度
+    ndepth_scale = ndepth.shape[0] / nimg.shape[0]
+    nimage_pts_depth = get_depth_from_depthmap(ndepth, nimage_pts, scale=ndepth_scale, search_window=5)
+    # 剔除深度为有效值(不为0)的点数少于2的线段
+    nimage_pts_depth_ = nimage_pts_depth > 0
+    valid_line_mask = np.sum(nimage_pts_depth_, axis=1) > 1
+    nimage_pts_depth = nimage_pts_depth[valid_line_mask]
+    nimage_pts = nimage_pts[valid_line_mask]
+    # 仍有深度为0的点，为了保持每条线段有7个点的条件
+    valid_pts_mask = nimage_pts_depth > 0
+
+    ## 3.投影
+    # 投影到三维中
+    nimage_pts_x = nimage_pts[:, :, 0]  # 行号
+    nimage_pts_y = nimage_pts[:, :, 1]  # 列号  
+    homo_pts3D = cam2world(nimage_pts_x, nimage_pts_y, nimage_pts_depth, ncam_dict)
+    # test:可视化
+    #viz_points2(homo_pts3D[:3, :].T)
+    # 投影到当前视角中
+    image_pts_x, image_pts_y, _= world2cam(homo_pts3D, cam_dict)
+    image_pts = np.hstack((image_pts_x, image_pts_y)).reshape(-1,7,2)
+    # test:可视化
+    #from visualize.visualize import visualize_point_line_image
+    #image_pts = image_pts.reshape(-1, 2)
+    #image_pts = np.clip(image_pts,[0, 0],[h-1, w-1])
+    #visualize_point_line_image(img, np.array([[]]), image_pts)
+            
+    ## 4.循环不同点的组合，获取组合的support point和线段长度，从候选线段中确定结果
+    image_lines = select_from_candidate_lines(image_pts, valid_pts_mask)
+
+    ## 5.Handle border
+    new_lines, valid = clip_line_to_boundaries(image_lines, img.shape, min_len=10)
+    image_lines = new_lines[valid]         
+    
+    return image_lines    
+
+
+def simplify_and_fill_mask(count):
+    """
+    将带有空洞的二值掩码转换为一个填充完整的、覆盖所有原始区域的最小凸多边形。
+    
+    Args:
+        count (np.ndarray): 原始的二值掩码 (0/1)。
+        
+    Returns:
+        np.ndarray: 经过凸包填充后的新二值掩码 (0/1)。
+    """
+    # 1. 查找所有有效像素的坐标 (这是关键的第一步)
+    # np.where(count > 0) 返回 (行索引数组, 列索引数组)
+    rows, cols = np.where(count > 0)
+    
+    # 组织成 N x 2 的点集 (x, y)，即 (列, 行)
+    points = np.vstack((cols, rows)).T  
+
+    # 2. 确保点集不为空
+    if points.shape[0] == 0:
+        # 如果没有有效点，返回全零掩码
+        return np.zeros_like(count, dtype=np.uint8)
+        
+    # 3. 计算整个点集的凸包
+    # hull 包含覆盖所有点的最小凸多边形的顶点坐标
+    hull = cv2.convexHull(points, returnPoints=True)
+
+    # 4. 创建新的空白掩码
+    # 必须确保 dtype 为 np.uint8，以便 cv2.drawContours 正常工作
+    filled_mask = np.zeros_like(count, dtype=np.uint8)
+
+    # 5. 用这个单一的凸包轮廓进行填充
+    cv2.drawContours(
+        filled_mask, 
+        [hull],        # 传入包含唯一凸包的列表
+        -1,            # 绘制所有轮廓 (在这里就是第 0 个)
+        color=1,       # 填充颜色为 1
+        thickness=cv2.FILLED # 填充整个区域
+    )
+
+    return filled_mask
+
+def grid_reprojection(nimg, ndepth, ncam_dict, img, depth, cam_dict, H):
+    '''
+    将渲染的新视角图像各像素投影到当前视角下，获得两视角间的重叠区域
+        - Args:
+            - ndepth:新视角图像的深度图
+            - ncam_dict:新视角的内外参字典
+            - depth:当前视角的深度图
+            - cam_dict:当前视角的内外参字典
+            - scale:缩小的倍数
+        - Returns:    
+            - count:在当前视角图像中的重叠区域，用0和1区分
+    '''
+    ############################## 重采样  ##############################
+    # 1.在当前视角下初始化格网坐标
+    height = img.shape[0]
+    width = img.shape[1]
+    grid = np.indices((height, width)).reshape(2, -1)  # shape[2, h, w]-->shape[2, h*w]
+    # 如果为当前视角，那就无需投影
+    if cam_dict['img_name'] == ncam_dict['img_name']:    
+        nx = grid[0].reshape(-1, 1)
+        ny = grid[1].reshape(-1, 1)
+    else:
+        # 2.获取深度
+        scale_x = depth.shape[0] / img.shape[0]
+        scale_y = depth.shape[1] / img.shape[1]
+        grid_depth = bilinear_interpolate(depth, grid[0], grid[1], [scale_x, scale_y])  # grid[0]为行号，grid[1]为列号
+        # 3.坐标转换：从新视角中取值，即从当前视角投影到新视角
+        homo_pts3D = cam2world(grid[0], grid[1], grid_depth, cam_dict)
+        nx, ny, _= world2cam(homo_pts3D, ncam_dict)
+
+    # 4.坐标转换：从新视角转换到经过H变换后的
+    warped_pts = warp_points(np.hstack((nx, ny)), H)
+    # 5.reshape，方便生成mask
+    nx = nx.reshape((height, width))  # nx为从上到下
+    ny = ny.reshape((height, width))  # ny为从左到右
+    nx_H = warped_pts[:, 0].reshape((height, width))
+    ny_H = warped_pts[:, 1].reshape((height, width))
+    ######################### 获取重叠区域  ##############################
+    # mask1：投影后在新视角航片x坐标范围内的像素
+    mask1 = (nx >= 0) & (nx <= (nimg.shape[0]))
+    # mask2:投影后在新视角航片y坐标范围内的像素
+    mask2 = (ny >= 0) & (ny <= (nimg.shape[1]))
+    # mask3:进一步做H变换后，x坐标在范围内
+    mask3 = (nx_H >= 0) & (nx_H <= (nimg.shape[0]))
+    # mask4:进一步做H变换后，y坐标在范围内
+    mask4 = (ny_H >= 0) & (ny_H <= (nimg.shape[1]))    
+    # 同时满足四个条件
+    mask = mask1 & mask2 & mask3 & mask4
+    # 确保 count 是 uint8 类型，值域为 0 和 1
+    count = np.where(mask, 1, 0).astype(np.uint8) 
+
+    ######################### 轮廓检测与内部填充 ##########################
+    count = simplify_and_fill_mask(count)
+
+    return count
+
+
+
+def views_transform(img, nimage_lines, cam_dict, nimg, ndepth, ncam_dict):
+    '''
+    邻近视角投影到当前视角，用深度突变边界剔除
+    '''
+    # 如果为当前视角，那就无需投影，直接返回lines
+    if cam_dict['img_name'] == ncam_dict['img_name']:
+        return nimage_lines
+    ## 1.在线段中插入5个点
+    nimage_pts = interpolate_line_segments(nimage_lines, num_points=5)
+    # test:可视化
+    #from visualize.visualize import visualize_point_line_image
+    #visualize_point_line_image(nimg, nimage_lines, nimage_pts)
+
+    ## 2.赋值深度
+    ndepth_scale = ndepth.shape[0] / nimg.shape[0]
+    nimage_pts_depth = get_depth_from_depthmap(ndepth, nimage_pts, scale=ndepth_scale, search_window=5)
+    # 剔除深度为有效值(不为0)的点数少于2的线段
+    nimage_pts_depth_ = nimage_pts_depth > 0
+    valid_line_mask = np.sum(nimage_pts_depth_, axis=1) > 1
+    nimage_pts_depth = nimage_pts_depth[valid_line_mask]
+    nimage_pts = nimage_pts[valid_line_mask]
+    # 仍有深度为0的点，为了保持每条线段有7个点的条件
+    valid_pts_mask = nimage_pts_depth > 0
+
+    ## 3.投影
+    # 投影到三维中
+    nimage_pts_x = nimage_pts[:, :, 0]  # 行号
+    nimage_pts_y = nimage_pts[:, :, 1]  # 列号  
+    homo_pts3D = cam2world(nimage_pts_x, nimage_pts_y, nimage_pts_depth, ncam_dict)
+    # test:可视化
+    #viz_points2(homo_pts3D[:3, :].T)
+    # 投影到当前视角中
+    image_pts_x, image_pts_y, _= world2cam(homo_pts3D, cam_dict)
+    image_pts = np.hstack((image_pts_x, image_pts_y)).reshape(-1,7,2)
+    # test:可视化
+    #from visualize.visualize import visualize_point_line_image
+    #image_pts = image_pts.reshape(-1, 2)
+    #image_pts = np.clip(image_pts,[0, 0],[h-1, w-1])
+    #visualize_point_line_image(img, np.array([[]]), image_pts)
+            
+    ## 4.循环不同点的组合，获取组合的support point和线段长度，从候选线段中确定结果
+    image_lines = select_from_candidate_lines(image_pts, valid_pts_mask)
+
+    ## 5.Handle border
+    new_lines, valid = clip_line_to_boundaries(image_lines, img.shape, min_len=10)
+    image_lines = new_lines[valid]         
+    
+    return image_lines    
+

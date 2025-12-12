@@ -73,3 +73,45 @@ def af_df_producer(lines, img):
                             np.zeros_like(img))    
     
     return df, angle, closest, raster_lines    
+
+
+def select_lines(img, nlines, raster_lines, retain_ratio):
+    retained_ids = []
+    
+    for idx, line in enumerate(nlines):
+        x1, y1 = line[0]
+        x2, y2 = line[1]
+        
+        # 计算线段长度（像素数）
+        length = int(np.sqrt((x2 - x1)**2 + (y2 - y1)**2))
+        if length == 0:
+            continue
+        
+        # 生成线段上的采样点
+        sampled_points = []
+        for i in range(length + 1):
+            t = i / length
+            x = int(x1 * (1 - t) + x2 * t)
+            y = int(y1 * (1 - t) + y2 * t)
+            
+            # 检查是否在图像范围内
+            if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
+                sampled_points.append((x, y))
+        
+        if not sampled_points:
+            continue
+        
+        # 统计在raster_lines区域内的点数
+        points_in_region = 0
+        for x, y in sampled_points:
+            if raster_lines[y, x] > 0:  # 假设raster_lines是二值图，0表示背景，>0表示线段区域
+                points_in_region += 1
+        
+        # 计算比例
+        ratio = points_in_region / len(sampled_points)
+        
+        # 如果满足阈值，则保留该线段
+        if ratio >= retain_ratio:
+            retained_ids.append(idx)
+    retained_nlines = nlines[retained_ids]
+    return retained_nlines

@@ -67,6 +67,7 @@ def viz_lines2D2(img, lines, output_path, name):
     plot_images([img], dpi=100, size=40)
     plot_lines([lines[:,:, [1, 0]]], indices=range(1))
     save_plot(os.path.join(output_path, name + '.jpg'))
+    plt.close()
 
 
 def viz_points(points):
