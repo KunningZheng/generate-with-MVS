@@ -80,6 +80,7 @@ def obtain_from_neighbors(near_image_ids, camerasInfo, images_path, depth_path, 
             os.makedirs(viz_path, exist_ok=True)
             viz_lines2D2(img, retained_nlines, viz_path, f"{os.path.splitext(img_name)[0]}_from_{nimg_id}")
 
+            '''
             ## Step3: 获取Proposal Map
             ndf, nangle, nclosest, nraster_lines = af_df_producer(retained_nlines, img)
             nbg_mask = 1 - nraster_lines
@@ -93,6 +94,8 @@ def obtain_from_neighbors(near_image_ids, camerasInfo, images_path, depth_path, 
                 hdf5_file.create_dataset("line_level", data=nangle.flatten())
                 hdf5_file.create_dataset("closest", data=nclosest.flatten())
                 hdf5_file.create_dataset("bg_mask", data=nbg_mask.flatten())
+            '''
+        test=0
 
 
 ####################### Stage3: Fuse Anchor Map and Proposal Map #######################
@@ -135,9 +138,11 @@ def main():
 
     ####################### Stage1: Tile and Avarage #######################
     print("### Stage1: Tile and Avarage ###")
+    '''
     tile_and_average(pth_m.images_path, nonoverlap_img_names, pth_m.gt_path, 
                      conf['patch_size'], conf['overlap'],
                      conf['num_H'], conf['random_contrast'], conf['n_jobs'])
+    '''
 
     ####################### Stage2: Obtain Supplentary Information from Neighbors #######################
     obtain_from_neighbors(near_image_ids, camerasInfo, pth_m.images_path, pth_m.depth_path, pth_m.gt_path,

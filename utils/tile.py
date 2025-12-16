@@ -128,12 +128,12 @@ def tiled_df_to_raster_lines(img, img_name, output_path, patch_size, overlap):
         
         # Step2: 读取df_block
         with h5py.File(anchor_map_path, 'r') as hdf5_file:
-            df_block = hdf5_file['df'][:].reshape((patch_size, patch_size))
+            df_block = hdf5_file['df'][:].reshape((-1, patch_size))
         # Step3: 
         raster_lines = (df_block < 2).astype(np.uint8)
+        bottom = min(bottom, raster_lines_global.shape[0])
         raster_lines_global[top:bottom, left:right] += raster_lines[0:patch_size, 0:patch_size]
-    
     # Step4: 二值化得到raster_lines_global
     raster_lines_global = (raster_lines_global>0).astype(np.uint8)
-
+    #raster_lines_global = cv2.dilate(raster_lines_global, np.ones((21, 21), dtype=np.uint8))
     return raster_lines_global

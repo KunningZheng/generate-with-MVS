@@ -4,6 +4,7 @@ from pytlsd import lsd
 from afm_op import afm
 import torch
 from skimage.draw import line
+from tqdm import tqdm
 
 def rasterize_lines(image_shape, lines):
     """
@@ -95,7 +96,7 @@ def select_lines(img, nlines, raster_lines, retain_ratio):
             y = int(y1 * (1 - t) + y2 * t)
             
             # 检查是否在图像范围内
-            if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
+            if 0 <= x < img.shape[0] and 0 <= y < img.shape[1]:
                 sampled_points.append((x, y))
         
         if not sampled_points:
@@ -104,7 +105,7 @@ def select_lines(img, nlines, raster_lines, retain_ratio):
         # 统计在raster_lines区域内的点数
         points_in_region = 0
         for x, y in sampled_points:
-            if raster_lines[y, x] > 0:  # 假设raster_lines是二值图，0表示背景，>0表示线段区域
+            if raster_lines[x, y] > 0:  # 假设raster_lines是二值图，0表示背景，>0表示线段区域
                 points_in_region += 1
         
         # 计算比例
@@ -115,3 +116,148 @@ def select_lines(img, nlines, raster_lines, retain_ratio):
             retained_ids.append(idx)
     retained_nlines = nlines[retained_ids]
     return retained_nlines
+
+
+import numpy as np
+
+def establish_line_correspondences(lines, nlines, 
+                                   t_angle=10.0, 
+                                   t_dist=10.0, 
+                                   t_overlap=0.3):
+    """
+    Establishes matching relationship between current view lines and projected neighbor lines
+    based on the Geometric Similarity Measurement described in the paper.
+    
+    Paper Source: "3-D Line Segment Reconstruction With Depth Maps for Photogrammetric Mesh Refinement"
+                  Section III-A-1, Eq (3)-(4), Table II.
+
+    Args:
+        lines: numpy array of shape (N, 2, 2). Current view lines (candidates, l_s).
+               Format: [[x1, y1], [x2, y2]] per line.
+        nlines: numpy array of shape (M, 2, 2). Neighbor view projected lines (virtual lines, v_r).
+        t_angle: Angle threshold in degrees (default 10 per Table II).
+        t_dist: Perpendicular distance threshold in pixels (default 10 per Table II).
+        t_overlap: Overlap threshold (default 0.3 per Table II).
+
+    Returns:
+        matches: List of tuples (nline_idx, line_idx, score).
+                 Indicates nlines[nline_idx] matches lines[line_idx] with similarity score.
+    """
+    
+    # 1. Pre-calculate vectors and lengths
+    # Vector for lines (N, 2)
+    vec_lines = lines[:, 1, :] - lines[:, 0, :]
+    len_lines = np.linalg.norm(vec_lines, axis=1)
+    
+    # Vector for nlines (M, 2)
+    vec_nlines = nlines[:, 1, :] - nlines[:, 0, :]
+    len_nlines = np.linalg.norm(vec_nlines, axis=1)
+    
+    # Avoid division by zero
+    len_lines[len_lines == 0] = 1e-6
+    len_nlines[len_nlines == 0] = 1e-6
+    
+    # Unit vectors
+    unit_lines = vec_lines / len_lines[:, None]
+    unit_nlines = vec_nlines / len_nlines[:, None]
+    
+    matches = []
+    
+    # Iterate over each projected line (reference/virtual line)
+    # The paper describes finding the best match for each virtual line v_r from candidates l_s
+    for i in tqdm(range(len(nlines))):
+        v_r = nlines[i]
+        u_v = unit_nlines[i]
+        l_v = len_nlines[i]
+        
+        # --- A. Angle Similarity (d_alpha) ---
+        # Compute dot product between current v_r and all candidate lines
+        # shape: (N,)
+        dots = np.abs(np.sum(unit_lines * u_v, axis=1))
+        dots = np.clip(dots, -1.0, 1.0)
+        angles_deg = np.degrees(np.arccos(dots))
+        
+        # d_alpha = 1 - alpha / T_alpha (Eq 4)
+        d_alpha = 1 - angles_deg / t_angle
+        
+        # Filter 1: Angle constraint
+        valid_angle_mask = d_alpha >= 0
+        
+        if not np.any(valid_angle_mask):
+            continue
+            
+        # Optimization: Only process candidates that pass angle test
+        candidate_indices = np.where(valid_angle_mask)[0]
+        
+        scores = []
+        
+        for j in candidate_indices:
+            l_s = lines[j]
+            l_cand = len_lines[j]
+            
+            # --- B. Distance Similarity (d1, d2) ---
+            # Perpendicular distance from endpoints of l_s (candidate) to line of v_r (virtual)
+            # Line v_r defined by point v_r[0] and direction u_v
+            # Dist = |(P - P0) cross U| (2D cross product is determinant)
+            
+            # Vector from v_r[0] to l_s endpoints
+            vec_p1 = l_s[0] - v_r[0]
+            vec_p2 = l_s[1] - v_r[0]
+            
+            # Cross product in 2D: x1*y2 - x2*y1
+            cross1 = vec_p1[0] * u_v[1] - vec_p1[1] * u_v[0]
+            cross2 = vec_p2[0] * u_v[1] - vec_p2[1] * u_v[0]
+            
+            dist1 = np.abs(cross1)
+            dist2 = np.abs(cross2)
+            
+            # d1 = 1 - v1 / T_d (Eq 4)
+            d1 = 1 - dist1 / t_dist
+            d2 = 1 - dist2 / t_dist
+            
+            if d1 < 0 or d2 < 0:
+                continue
+                
+            # --- C. Overlap Similarity (d_o) ---
+            # Project l_s onto the line of v_r to measure overlap
+            # We define coordinate system along v_r starting at v_r[0]
+            # Projection of point P is (P - P0) dot U
+            proj_v_start = 0.0
+            proj_v_end = l_v
+            
+            proj_l_start = np.dot(l_s[0] - v_r[0], u_v)
+            proj_l_end = np.dot(l_s[1] - v_r[0], u_v)
+            
+            # Ensure l_start < l_end for interval logic
+            if proj_l_start > proj_l_end:
+                proj_l_start, proj_l_end = proj_l_end, proj_l_start
+                
+            # Intersection of [0, l_v] and [proj_l_start, proj_l_end]
+            inter_start = max(0.0, proj_l_start)
+            inter_end = min(l_v, proj_l_end)
+            
+            length_o = max(0.0, inter_end - inter_start)
+            
+            # d_o = Length_o / min(Length_v, Length_l) / T_o - 1 (Eq 4)
+            min_len = min(l_v, l_cand)
+            if min_len < 1e-6:
+                d_o = -1
+            else:
+                d_o = (length_o / min_len) / t_overlap - 1
+                
+            if d_o < 0:
+                continue
+                
+            # --- Final Similarity ---
+            # Sim = d_alpha + d1 + d2 (Eq 3, if overlap condition met)
+            sim = d_alpha[j] + d1 + d2
+            scores.append((j, sim))
+        
+        # Select best match for this virtual line
+        if scores:
+            # Sort by score descending
+            scores.sort(key=lambda x: x[1], reverse=True)
+            best_idx, best_score = scores[0]
+            matches.append((i, best_idx, best_score))
+
+    return matches
