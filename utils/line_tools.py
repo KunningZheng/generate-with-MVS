@@ -165,7 +165,7 @@ def establish_line_correspondences(lines, nlines,
     
     # Iterate over each projected line (reference/virtual line)
     # The paper describes finding the best match for each virtual line v_r from candidates l_s
-    for i in tqdm(range(len(nlines))):
+    for i in range(len(nlines)):
         v_r = nlines[i]
         u_v = unit_nlines[i]
         l_v = len_nlines[i]
