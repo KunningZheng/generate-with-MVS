@@ -17,8 +17,8 @@ from datasets.dataset_reader import (
 )
 from datasets.line3dpp_loader import parse_line_segments, parse_lines3dpp, save_segments_l3dpp
 from deeplsd.geometry.line_utils import clip_line_to_boundaries
-from transformation.views_transform_fang import views_transform
-from utils.line_tools import establish_line_correspondences
+from transformation.views_transform_fang import views_transform_reverse
+from utils.line_tools import establish_line_correspondences_reverse
 from utils.visualize import viz_lines2D2
 
 
@@ -102,15 +102,17 @@ def project_and_establish_correspondences(camerasInfo, overlap_images, reconstru
         # 确定是.png还是.jpg
         if os.path.exists(os.path.join(images_path, cam_dict['img_name']+'.png')):
             img = cv2.imread(os.path.join(images_path, cam_dict['img_name']+'.png'), 0)
+            depth = read_depth(os.path.join(depth_path, cam_dict['img_name']+'.png.geometric.bin'))
         else:
             img = cv2.imread(os.path.join(images_path, cam_dict['img_name']+'.jpg'), 0)
+            depth = read_depth(os.path.join(depth_path, cam_dict['img_name']+'.jpg.geometric.bin'))
 
         
         ## 提取当前视角lines
         lines = parse_line_segments(lsd_lines_path, img_id+1, width, height).reshape(-1, 2, 2)
         lines, valid = clip_line_to_boundaries(lines, img.shape, min_len=0)
         lines = lines[valid]
-        #viz_lines2D2(img, lines, output_path, f"{os.path.splitext(img_name)[0]}")
+        viz_lines2D2(img, lines, output_path, f"{os.path.splitext(img_name)[0]}")
 
         ## 逐邻近视角循环
         valid_idx_all = []
@@ -125,29 +127,32 @@ def project_and_establish_correspondences(camerasInfo, overlap_images, reconstru
             # 确定是.png还是.jpg
             if os.path.exists(os.path.join(images_path, cam_dict['img_name']+'.png')):
                 nimg = cv2.imread(os.path.join(images_path, ncam_dict['img_name']+'.png'), 0)
-                ndepth = read_depth(os.path.join(depth_path, ncam_dict['img_name']+'.png.geometric.bin'))
             else:
                 nimg = cv2.imread(os.path.join(images_path, ncam_dict['img_name']+'.jpg'), 0)
-                ndepth = read_depth(os.path.join(depth_path, ncam_dict['img_name']+'.jpg.geometric.bin'))
             
             ## 提取邻近视角lines
             nlines = parse_line_segments(lsd_lines_path, nimg_id+1, nwidth, nheight).reshape(-1, 2, 2)
             nlines, valid = clip_line_to_boundaries(nlines, nimg.shape, min_len=0)
             nlines = nlines[valid]
 
-            ## 投影线段，裁剪到当前视角范围内
-            nlines = views_transform(img, nlines, cam_dict, nimg, ndepth, ncam_dict)
-            viz_lines2D2(img, nlines, output_path, f"{os.path.splitext(img_name)[0]}_{nimg_id}")
+            ## 投影线段，裁剪到邻近视角范围内
+            lines_proj, line_indices = views_transform_reverse(nimg, lines, ncam_dict, img, depth, cam_dict)
+            #viz_lines2D2(nimg, lines_proj, output_path, f"{os.path.splitext(img_name)[0]}_{nimg_id}")
 
             # 3. 建立线段对应关系
-            matches = establish_line_correspondences(lines, nlines, t_angle=1.0, 
+            matches = establish_line_correspondences_reverse(lines_proj, nlines, t_angle=1.0, 
                                    t_dist=1.0, 
                                    t_overlap=0.95)
 
             valid_idx = set()
-            for _, l_idx, _ in matches:
-                valid_idx.add(l_idx)
-            valid_idx = list(valid_idx)
+            for l_idx_proj, _, _ in matches:
+                # l_idx_proj 是 lines_proj 中的下标 (0 ~ len(lines_proj)-1)
+                # 我们需要通过 line_indices 数组找到它在原始 lines 中的真实下标
+                original_idx = line_indices[l_idx_proj]
+                valid_idx.add(original_idx)
+
+            # 转为列表并排序（保持顺序一致性）
+            valid_idx = sorted(list(valid_idx))
             #viz_lines2D2(img, lines[valid_idx], output_path, f"{os.path.splitext(img_name)[0]}_matched_{nimg_id}")
             valid_idx_all.append(valid_idx)
 
@@ -288,7 +293,7 @@ def analyze_results(index_counts, corres_idx_all, reconstructed_idx_all, top3000
 if __name__ == "__main__":
     ####################################### 参数 #######################################
     workspace = r"/home/rylynn/Pictures/datasets_3Dline/MatrixCity/block_B/" #/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/
-    overlap_percentile = 90       # 自动阈值分位数,可以简单理解为取前%为重叠航片
+    overlap_percentile = 30       # 自动阈值分位数,可以简单理解为取前%为重叠航片
 
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')

@@ -261,6 +261,104 @@ def select_from_candidate_lines(image_pts, valid_pts_mask, dist_thredshold=1):
     return image_lines
 
 
+
+def select_from_candidate_lines_reverse(image_pts, valid_pts_mask, line_indices, dist_thredshold=1):
+    '''
+    修改说明：
+    1. 增加输入 line_indices
+    2. 增加对 groups_of_pts 为空的防崩溃判断
+    3. 输出同步筛选后的 line_indices
+    '''
+    # 使用列表存储结果，以应对可能存在的无效线段被剔除的情况
+    final_image_lines = []
+    final_line_indices = []
+
+    for i, line_pts in enumerate(image_pts):
+        # 获取当前线段对应的原始序号
+        current_original_index = line_indices[i]
+        
+        # 生成所有点之间的不重复组合
+        pts_num = list(range(image_pts.shape[1]))
+        
+        # 过滤出深度有效的点编号
+        valid_pts_num = [num for num, is_valid in zip(pts_num, valid_pts_mask[i]) if is_valid]
+        
+        # 如果有效点少于2个，无法构成线段，直接跳过（同时也剔除了对应的序号）
+        if len(valid_pts_num) < 2:
+            continue
+            
+        groups_of_pts = list(itertools.combinations(valid_pts_num, 2))
+        
+        # 二次检查：如果没有组合（理论上上面len<2已拦截，但在逻辑上保持严谨）
+        if not groups_of_pts:
+            continue
+
+        # 初始化候选线段的存储矩阵
+        candidate_lines = np.zeros((len(groups_of_pts), 8))
+        candidateID = 0
+        
+        for (p_idx_1, p_idx_2) in groups_of_pts:
+            # 记录pt1
+            pt1 = line_pts[p_idx_1]
+            candidate_lines[candidateID, 0] = p_idx_1
+            candidate_lines[candidateID, 1] = pt1[0]
+            candidate_lines[candidateID, 2] = pt1[1]
+            
+            # 记录pt2
+            pt2 = line_pts[p_idx_2]
+            candidate_lines[candidateID, 3] = p_idx_2
+            candidate_lines[candidateID, 4] = pt2[0]
+            candidate_lines[candidateID, 5] = pt2[1]
+            
+            # 记录候选线段的长度
+            line_length = np.linalg.norm(pt2 - pt1)
+            candidate_lines[candidateID, 6] = line_length 
+            
+            # 计算各点到当前候选线段的垂直距离
+            # 假设 point_to_line_segment_distance 是外部定义的函数
+            orth_dist = point_to_line_segment_distance(pt1, pt2, line_pts)
+            
+            # 距离阈值筛选support_point的数量
+            support_point = np.count_nonzero((orth_dist < dist_thredshold))
+            candidate_lines[candidateID, 7] = support_point # 记录候选线段的support_point数量
+            candidateID += 1
+            
+        # 从所有的candidate_lines中找到support_point数量最多的线段
+        if candidate_lines.shape[0] == 0:
+            continue
+
+        max_value = np.max(candidate_lines[:, 7])
+        # 找到所有最大值的索引
+        max_indices = np.where(candidate_lines[:, 7] == max_value)[0]
+        
+        resultID = 0
+        if max_indices.size == 1:
+            resultID = int(max_indices[0])
+        else:
+            # 在support_point数量最多的线段中，找到长度最长的线段
+            max_length = 0
+            for id in max_indices:
+                if candidate_lines[id, 6] > max_length:
+                    max_length = candidate_lines[id, 6]
+                    resultID = id
+        
+        # 提取最佳线段坐标
+        best_line = np.zeros((2, 2))
+        best_line[0, :] = [candidate_lines[resultID, 1], candidate_lines[resultID, 2]]
+        best_line[1, :] = [candidate_lines[resultID, 4], candidate_lines[resultID, 5]]
+        
+        # 将结果存入列表
+        final_image_lines.append(best_line)
+        final_line_indices.append(current_original_index)
+    
+    # 转换为numpy数组
+    if len(final_image_lines) > 0:
+        return np.array(final_image_lines), np.array(final_line_indices)
+    else:
+        # 防止结果为空时返回空列表导致后续报错，返回空数组
+        return np.empty((0, 2, 2)), np.array([], dtype=int)
+
+
 def get_depth_from_depthmap(depthmap, points, scale=1.0, search_window=5):
     """
     从深度图中获取深度值。
@@ -566,6 +664,49 @@ def grid_reprojection(nimg, ndepth, ncam_dict, img, depth, cam_dict, H):
     return count
 
 
+def grid_reprojection_(nimg_shape, ncam_dict, img_shape, depth, cam_dict):
+    '''
+    将当前视角的各像素投影到邻近视角，看有哪些像素可见，注意和grid_reprojection的区别是这里没有H变换
+        - Args:
+            - nimg:邻近视角图像
+            - ncam_dict:邻近视角的内外参字典
+            - depth:当前视角的深度图
+            - cam_dict:当前视角的内外参字典
+            - scale:缩小的倍数
+        - Returns:    
+            - count:在当前视角图像中的重叠区域，用0和1区分
+    '''
+    ############################## 重采样  ##############################
+    # 1.在当前视角下初始化格网坐标
+    height = img_shape[0]
+    width = img_shape[1]
+    grid = np.indices((height, width)).reshape(2, -1)  # shape[2, h, w]-->shape[2, h*w]
+    # 2.获取深度
+    scale_x = depth.shape[0] / height
+    scale_y = depth.shape[1] / width
+    grid_depth = bilinear_interpolate(depth, grid[0], grid[1], [scale_x, scale_y])  # grid[0]为行号，grid[1]为列号
+    # 3.坐标转换：从新视角中取值，即从当前视角投影到新视角
+    homo_pts3D = cam2world(grid[0], grid[1], grid_depth, cam_dict)
+    nx, ny, _= world2cam(homo_pts3D, ncam_dict)
+
+    # 4.reshape，方便生成mask
+    nx = nx.reshape((height, width))  # nx为从上到下
+    ny = ny.reshape((height, width))  # ny为从左到右
+    ######################### 获取重叠区域  ##############################
+    # mask1：投影后在新视角航片x坐标范围内的像素
+    mask1 = (nx >= 0) & (nx <= (nimg_shape[0]))
+    # mask2:投影后在新视角航片y坐标范围内的像素
+    mask2 = (ny >= 0) & (ny <= (nimg_shape[1])) 
+    # 同时满足两个条件
+    mask = mask1 & mask2
+    # 确保 count 是 uint8 类型，值域为 0 和 1
+    count = np.where(mask, 1, 0).astype(np.uint8) 
+
+    ######################### 轮廓检测与内部填充 ##########################
+    count = simplify_and_fill_mask(count)
+
+    return count
+
 
 def views_transform(img, nimage_lines, cam_dict, nimg, ndepth, ncam_dict):
     '''
@@ -616,3 +757,59 @@ def views_transform(img, nimage_lines, cam_dict, nimg, ndepth, ncam_dict):
     
     return image_lines    
 
+
+def views_transform_reverse(nimg, image_lines, ncam_dict, img, depth, cam_dict):
+    '''
+    当前视角投影到邻近视角，用深度突变边界剔除
+    '''
+    # 如果为当前视角，那就无需投影，直接返回lines
+    if cam_dict['img_name'] == ncam_dict['img_name']:
+        return image_lines
+    
+    # 0: 初始化原始线段的序号索引
+    line_indices = np.arange(len(image_lines))
+
+    ## 1.在线段中插入5个点
+    image_pts = interpolate_line_segments(image_lines, num_points=5)
+    # test:可视化
+    #from visualize.visualize import visualize_point_line_image
+    #visualize_point_line_image(nimg, nimage_lines, nimage_pts)
+
+    ## 2.赋值深度
+    depth_scale = depth.shape[0] / img.shape[0]
+    image_pts_depth = get_depth_from_depthmap(depth, image_pts, scale=depth_scale, search_window=5)
+    # 剔除深度为有效值(不为0)的点数少于2的线段
+    image_pts_depth_ = image_pts_depth > 0
+    valid_line_mask = np.sum(image_pts_depth_, axis=1) > 1
+    image_pts_depth = image_pts_depth[valid_line_mask]
+    image_pts = image_pts[valid_line_mask]
+    # 同步筛选序号 (深度筛选)
+    line_indices = line_indices[valid_line_mask]
+    # 仍有深度为0的点，为了保持每条线段有7个点的条件
+    valid_pts_mask = image_pts_depth > 0
+
+    ## 3.投影
+    # 投影到三维中
+    image_pts_x = image_pts[:, :, 0]  # 行号
+    image_pts_y = image_pts[:, :, 1]  # 列号  
+    homo_pts3D = cam2world(image_pts_x, image_pts_y, image_pts_depth, cam_dict)
+    # test:可视化
+    #viz_points2(homo_pts3D[:3, :].T)
+    # 投影到邻近视角中
+    nimage_pts_x, nimage_pts_y, _= world2cam(homo_pts3D, ncam_dict)
+    nimage_pts = np.hstack((nimage_pts_x, nimage_pts_y)).reshape(-1,7,2)
+    # test:可视化
+    #from visualize.visualize import visualize_point_line_image
+    #image_pts = image_pts.reshape(-1, 2)
+    #image_pts = np.clip(image_pts,[0, 0],[h-1, w-1])
+    #visualize_point_line_image(img, np.array([[]]), image_pts)
+            
+    ## 4.循环不同点的组合，获取组合的support point和线段长度，从候选线段中确定结果
+    nimage_lines, line_indices = select_from_candidate_lines_reverse(nimage_pts, valid_pts_mask, line_indices)
+
+    ## 5.Handle border
+    new_lines, valid = clip_line_to_boundaries(nimage_lines, nimg.shape, min_len=10)
+    nimage_lines = new_lines[valid]         
+    line_indices = line_indices[valid]
+
+    return nimage_lines, line_indices    

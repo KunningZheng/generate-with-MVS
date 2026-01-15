@@ -17,12 +17,12 @@ from utils.visualize import viz_lines2D2
 
 if __name__ == "__main__":
     ####################################### 参数 #######################################
-    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/"
+    workspace = r"/home/rylynn/Pictures/datasets_3Dline/MatrixCity/block_B/"
 
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')
     images_path = os.path.join(workspace, 'images')
-    output_path = os.path.join(workspace, 'intermediate_results_0104')
+    output_path = os.path.join(workspace, 'intermediate_results_0112')
     lsd_lines_path = os.path.join(output_path, 'lsd_lines_all')
     len3000_path = os.path.join(output_path, 'lsd_lines_len3000')
     os.makedirs(len3000_path, exist_ok=True)
@@ -59,10 +59,10 @@ if __name__ == "__main__":
         topk_indices_all[img_id] = topk_indices.tolist()
  
         #save_segments_l3dpp(lines_topk, len3000_path, img_id+1, width, height)
-        img = cv2.imread(os.path.join(images_path, cam_dict['img_name']+'.jpg'), 0)
-        viz_lines2D2(img, lines_topk[:, [1,0,3,2]].reshape(-1,2,2), viz_path, f"{os.path.splitext(img_name)[0]}")
+        img = cv2.imread(os.path.join(images_path, cam_dict['img_name']+'.png'), 0)
+        #viz_lines2D2(img, lines_topk[:, [1,0,3,2]].reshape(-1,2,2), viz_path, f"{os.path.splitext(img_name)[0]}")
     
     # 保存top3000线段的索引
-    #with open(os.path.join(len3000_path, 'top3000_indices.json'), 'w') as f:
-        #json.dump(topk_indices_all, f)
+    with open(os.path.join(len3000_path, 'top3000_indices.json'), 'w') as f:
+        json.dump(topk_indices_all, f)
 

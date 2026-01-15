@@ -118,7 +118,6 @@ def select_lines(img, nlines, raster_lines, retain_ratio):
     return retained_nlines
 
 
-import numpy as np
 
 def establish_line_correspondences(lines, nlines, 
                                    t_angle=10.0, 
@@ -258,6 +257,146 @@ def establish_line_correspondences(lines, nlines,
             # Sort by score descending
             scores.sort(key=lambda x: x[1], reverse=True)
             best_idx, best_score = scores[0]
+            matches.append((i, best_idx, best_score))
+
+    return matches
+
+
+def establish_line_correspondences_reverse(lines, nlines, 
+                                   t_angle=10.0, 
+                                   t_dist=10.0, 
+                                   t_overlap=0.3):
+    """
+    Establishes matching relationship between current view lines and projected neighbor lines
+    based on the Geometric Similarity Measurement described in the paper.
+    
+    Paper Source: "3-D Line Segment Reconstruction With Depth Maps for Photogrammetric Mesh Refinement"
+                  Section III-A-1, Eq (3)-(4), Table II.
+
+    Args:
+        lines: numpy array of shape (N, 2, 2). Current view lines (candidates, l_s).
+               Format: [[x1, y1], [x2, y2]] per line.
+        nlines: numpy array of shape (M, 2, 2). Neighbor view projected lines (virtual lines, v_r).
+        t_angle: Angle threshold in degrees (default 10 per Table II).
+        t_dist: Perpendicular distance threshold in pixels (default 10 per Table II).
+        t_overlap: Overlap threshold (default 0.3 per Table II).
+
+    Returns:
+        matches: List of tuples (line_idx, nline_idx, score).
+                        Indicates lines[line_idx] matches nlines[nline_idx] with similarity score.
+    """
+    
+    # 1. Pre-calculate vectors and lengths
+    # Vector for lines (N, 2)
+    vec_lines = lines[:, 1, :] - lines[:, 0, :]
+    len_lines = np.linalg.norm(vec_lines, axis=1)
+    
+    # Vector for nlines (M, 2)
+    vec_nlines = nlines[:, 1, :] - nlines[:, 0, :]
+    len_nlines = np.linalg.norm(vec_nlines, axis=1)
+    
+    # Avoid division by zero
+    len_lines[len_lines == 0] = 1e-6
+    len_nlines[len_nlines == 0] = 1e-6
+    
+    # Unit vectors
+    unit_lines = vec_lines / len_lines[:, None]
+    unit_nlines = vec_nlines / len_nlines[:, None]
+    
+    matches = []
+    
+    # Iterate over each CURRENT view line (Reference)
+    # Changed: range(len(nlines)) -> range(len(lines))
+    for i in range(len(lines)):
+        # Ref: The current view line
+        l_ref_seg = lines[i]       # coords
+        u_ref = unit_lines[i]      # unit vector
+        len_ref = len_lines[i]     # length
+        
+        # --- A. Angle Similarity (d_alpha) ---
+        # Compute dot product between current Ref (lines[i]) and ALL candidates (nlines)
+        # shape: (M,)
+        dots = np.abs(np.sum(unit_nlines * u_ref, axis=1))
+        dots = np.clip(dots, -1.0, 1.0)
+        angles_deg = np.degrees(np.arccos(dots))
+        
+        # d_alpha = 1 - alpha / T_alpha
+        d_alpha = 1 - angles_deg / t_angle
+        
+        # Filter 1: Angle constraint
+        valid_angle_mask = d_alpha >= 0
+        
+        if not np.any(valid_angle_mask):
+            continue
+            
+        # Optimization: Only process candidates (nlines) that pass angle test
+        candidate_indices = np.where(valid_angle_mask)[0]
+        
+        scores = []
+        
+        for j in candidate_indices:
+            # Cand: The neighbor projected line
+            l_cand_seg = nlines[j]
+            len_cand = len_nlines[j]
+            
+            # --- B. Distance Similarity (d1, d2) ---
+            # Perpendicular distance from endpoints of CANDIDATE (nlines[j]) 
+            # to the infinite line defined by REFERENCE (lines[i])
+            
+            # Vector from Ref start (lines[i][0]) to Cand endpoints
+            vec_p1 = l_cand_seg[0] - l_ref_seg[0]
+            vec_p2 = l_cand_seg[1] - l_ref_seg[0]
+            
+            # Cross product with Ref direction (u_ref)
+            cross1 = vec_p1[0] * u_ref[1] - vec_p1[1] * u_ref[0]
+            cross2 = vec_p2[0] * u_ref[1] - vec_p2[1] * u_ref[0]
+            
+            dist1 = np.abs(cross1)
+            dist2 = np.abs(cross2)
+            
+            d1 = 1 - dist1 / t_dist
+            d2 = 1 - dist2 / t_dist
+            
+            if d1 < 0 or d2 < 0:
+                continue
+                
+            # --- C. Overlap Similarity (d_o) ---
+            # Project CANDIDATE (nlines[j]) onto REFERENCE (lines[i])
+            # Coordinate system based on lines[i], range [0, len_ref]
+            
+            proj_cand_start = np.dot(l_cand_seg[0] - l_ref_seg[0], u_ref)
+            proj_cand_end = np.dot(l_cand_seg[1] - l_ref_seg[0], u_ref)
+            
+            if proj_cand_start > proj_cand_end:
+                proj_cand_start, proj_cand_end = proj_cand_end, proj_cand_start
+                
+            # Intersection of Reference [0, len_ref] and Projected Candidate
+            inter_start = max(0.0, proj_cand_start)
+            inter_end = min(len_ref, proj_cand_end)
+            
+            length_o = max(0.0, inter_end - inter_start)
+            
+            # d_o calculation
+            min_len = min(len_ref, len_cand)
+            if min_len < 1e-6:
+                d_o = -1
+            else:
+                d_o = (length_o / min_len) / t_overlap - 1
+                
+            if d_o < 0:
+                continue
+                
+            # --- Final Similarity ---
+            # Sim = d_alpha + d1 + d2
+            # Note: d_alpha is array, need index j
+            sim = d_alpha[j] + d1 + d2
+            scores.append((j, sim))
+        
+        # Select best nline match for this current line
+        if scores:
+            scores.sort(key=lambda x: x[1], reverse=True)
+            best_idx, best_score = scores[0]
+            # Returns: (line_idx, nline_idx, score)
             matches.append((i, best_idx, best_score))
 
     return matches

@@ -1,6 +1,8 @@
 import os
 import sys
 import numpy as np
+import cv2
+os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 from datasets.colmap_loader import qvec2rotmat, read_extrinsics_binary, read_intrinsics_binary, read_extrinsics_text, read_intrinsics_text, \
  read_points3D_binary, read_points3D_text
 
@@ -170,3 +172,25 @@ def read_cam_dict(cam_dict):
     pos = np.array(cam_dict['position'])
     rot = np.array(cam_dict['rotation'])
     return pos, rot, cam_dict['fx'], cam_dict['fy'], cam_dict['width'], cam_dict['height']
+
+
+def load_depth_float32(depth_path):
+    # 1. 读取数据
+    # 使用 UNCHANGED 或 ANYDEPTH 确保读取原始的 float32 数据
+    image = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)[...,0] #(H, W)
+    
+
+    # 2. 处理无效值 (Sky/Infinity)
+    # 在 float32 模式下，天空可能不再是 65504，而是非常大的数或 np.inf
+    # 你可以根据需要设置一个阈值，比如 1000米 或 100000厘米
+    # 这里示例将其标记为无效（如果需要掩码）
+    # invalid_mask = (image > 1e9) | np.isinf(image)
+
+    # 3. 单位转换：获取 COLMAP 定义的深度值
+    # 文档明确指出："raw data ... is cm" (原始数据是厘米)
+    # COLMAP 标准输出通常使用 "米" (Meters)
+    # 提供的参考代码用了 /10000 (转为百米单位)，如果你要标准米，请除以 100
+    
+    depth_in_meters = image / 10000.0  # cm -> meters
+    
+    return depth_in_meters
