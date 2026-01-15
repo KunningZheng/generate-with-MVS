@@ -400,3 +400,31 @@ def establish_line_correspondences_reverse(lines, nlines,
             matches.append((i, best_idx, best_score))
 
     return matches
+
+
+def lsd_opencv(img):
+    '''
+    模仿line3D++中lsd_opencv.cpp，获取线段
+    return:
+        filtered_lines: np.array(N, 4)
+    '''
+    # 1. 调整参数：将 density_th 设置为 0.7 (与 lsd_opencv 一致)
+    # 注意：scale 和 sigma_scale 默认值在 PYAPI.cpp 中已经是 0.8 和 0.6，与 lsd_opencv 一致
+    lines = lsd(img, density_th=0.7)
+
+    # 2. 模拟 line3D 的长度过滤 (L3D_DEF_MIN_LINE_LENGTH_FACTOR 为 0.005)
+    # line3D.cc 中计算长度: sqrt(dx*dx + dy*dy)
+    h, w = img.shape[:2]
+    diag = np.sqrt(h**2 + w**2)
+    min_len = diag * 0.005
+
+    filtered_lines = []
+    for line in lines:
+        x1, y1, x2, y2, _ = line
+        length = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+        if length > min_len:
+            filtered_lines.append(line)
+
+    filtered_lines = np.array(filtered_lines)
+
+    return filtered_lines
