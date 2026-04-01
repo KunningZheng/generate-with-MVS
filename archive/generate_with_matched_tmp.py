@@ -58,7 +58,7 @@ def process_single_view_worker(args):
     
     # 注意：这里你需要确保 matched_lines_path 这个路径在 worker 里是正确的
     # 建议最好也通过 args 传进来，目前保持原样
-    matched_lines_path = '/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/intermediate_results_0116/matched_lines_50'
+    matched_lines_path = '/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin_block1/intermediate_results_matched1/matched_lines/'
     lines_matched = parse_line_segments(matched_lines_path, img_id+1, width, height).reshape(-1, 2, 2)
     
     # 可视化部分（如果在已有文件时跳过，这里也会跳过，节省大量IO时间）
@@ -155,14 +155,11 @@ if __name__ == "__main__":
         pass
     
     ####################################### 参数 #######################################
-    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/"
+    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin_block1/"
 
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')
-    output_path = os.path.join(workspace, 'intermediate_results_0118')
-    # 注意：这里的 matched_lines_path 并没有传递进 parallel 函数，
-    # 它是硬编码在 worker 函数里的，请确保 worker 里的路径是对的。
-    matched_lines_path = '/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/intermediate_results_0116/matched_lines_50'
+    output_path = os.path.join(workspace, 'intermediate_results_0207')
 
     # 0. 数据准备：读取稀疏模型
     camerasInfo, points_in_images = load_sparse_model(sparse_model_path, image_scale=1)
@@ -178,11 +175,29 @@ if __name__ == "__main__":
         near_image_ids = json.load(f)
     near_image_ids = {int(k):v for k,v in near_image_ids.items()}
 
+    # 新增：block1中有些图像植被占地比较多，手动去掉了gt图，所以更新一下near_images_ids
+    gt_images_path = os.path.join(output_path, 'gt', 'images')
+    near_image_ids_filtered = {}
+    for img_id in near_image_ids:
+        img_name = camerasInfo[img_id]['img_name'].split('/')[1]
+        gt_img_pth = os.path.join(gt_images_path, img_name+'.jpg')
+        if os.path.exists(gt_img_pth):
+            near_image_ids_filtered[img_id] = near_image_ids[img_id]
+            overlap_mask_pth = os.path.join(output_path, "overlap_mask", f"overlap_mask_{img_id}.npy")
+            new_overlap_mask_pth = os.path.join(output_path, "gt", "overlap_mask", f"overlap_mask_{img_id}.npy")
+            if os.path.exists(overlap_mask_pth):
+                # 复制overlap_mask到新路径
+                os.makedirs(os.path.dirname(new_overlap_mask_pth), exist_ok=True)
+                np.save(new_overlap_mask_pth, np.load(overlap_mask_pth))
+
+
+
+
     cv2.setNumThreads(0)
     
     # 3. 执行
     project_and_establish_correspondences_parallel(
-        camerasInfo, near_image_ids,
+        camerasInfo, near_image_ids_filtered,
         images_path=os.path.join(workspace, 'images'),
         depth_path=os.path.join(workspace, 'depth_maps'),
         output_path=output_path,

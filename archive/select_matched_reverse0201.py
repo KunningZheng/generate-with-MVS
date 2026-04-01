@@ -12,13 +12,24 @@ import logging
 from datasets.dataset_reader import (
     load_sparse_model,
     match_pair,
+    find_common_points,
+    compute_bounding_box,
     read_depth
 )
 from datasets.line3dpp_loader import parse_line_segments, parse_lines3dpp, save_segments_l3dpp
 from deeplsd.geometry.line_utils import clip_line_to_boundaries
 from transformation.views_transform_fang import views_transform_reverse
-from utils.line_tools import establish_line_correspondences_reverse
-from utils.visualize import viz_lines2D2
+from utils.line_tools import establish_line_correspondences_reverse, lsd_opencv
+from utils.visualize import viz_lines2D2, viz_pairwise_matches
+
+
+def compute_overlap_ratio(cam_dict1, cam_dict2, common_points):
+    """计算重叠比例"""
+    bb_area1 = compute_bounding_box(common_points[:, 0])
+    bb_area2 = compute_bounding_box(common_points[:, 1])
+    area1 = cam_dict1['width'] * cam_dict1['height']
+    area2 = cam_dict2['width'] * cam_dict2['height']
+    return bb_area1 / area1, bb_area2 / area2
 
 
 def save_dict_to_json(data, save_path):
@@ -56,6 +67,35 @@ def select_nearby_views(camerasInfo, points_in_images, overlap_percentile = 90):
 
     ######################## Step2:根据阈值寻找邻近相片 ########################
     _, overlap_images = match_pair(camerasInfo, points_in_images, match_point_num=match_point_num)
+
+    '''
+    # 添加筛选步骤
+    area_ratio_th = 0.5           # 面积重叠比例阈值
+    dist_th = 25.0                # 相机中心距离阈值（米）
+    near_image_ids = {}
+    for img1_id in range(len(camerasInfo)):
+        cam_dict1 = camerasInfo[img1_id]
+        lens1 = cam_dict1['img_name'].split('/')[0]
+        near_images = []
+        for img2_id in overlap_images.get(img1_id, []):
+            cam_dict2 = camerasInfo[img2_id]
+            lens2 = cam_dict2['img_name'].split('/')[0]
+            dist = np.linalg.norm(np.array(cam_dict1['position']) - np.array(cam_dict2['position']))
+            if dist > dist_th:
+                continue
+            common_points = find_common_points(img1_id, img2_id, camerasInfo)
+            if common_points is None or len(common_points) < 10:
+                continue
+            r1, r2 = compute_overlap_ratio(cam_dict1, cam_dict2, common_points)
+            # 保证两个相片的镜头相同（避免大的偏移）
+            if r1 > area_ratio_th and r2 > area_ratio_th and lens1 == lens2:
+                near_images.append(int(img2_id))
+        near_image_ids[img1_id] = near_images
+    '''
+    json_path = os.path.join(output_path, f"near_image_ids_{match_point_num}_test.json")
+    with open(json_path, 'w') as f:
+        json.dump(overlap_images, f, indent=2)
+    print(f"[INFO] Saved near-image dictionary to {json_path}")
     return overlap_images
 
 
@@ -68,7 +108,7 @@ def process_single_view_worker(args):
     为了适配 multiprocessing，将所有参数打包到一个元组 args 中，
     或者使用 partial 固定固定参数。
     """
-    (img_id, nimg_ids, camerasInfo, reconstructed_idx_all, top3000_indices_all, 
+    (img_id, nimg_ids, camerasInfo, 
      lsd_lines_path, images_path, depth_path, output_path, neighbor_thred) = args
 
     # [重要] 如果 viz_lines2D2 用到了 plt，必须加上这一句防止崩溃
@@ -94,10 +134,39 @@ def process_single_view_worker(args):
         img = cv2.imread(os.path.join(images_path, cam_dict['img_name']+'.jpg'), 0)
         depth = read_depth(os.path.join(depth_path, cam_dict['img_name']+'.jpg.geometric.bin'))
     
+    # 保存彩色的深度图
+    # 1. 提取有效区域
+    valid_mask = depth > 0
+    if np.any(valid_mask):
+        valid_depths = depth[valid_mask]
+        
+        # 2. 使用百分位截断排除极值干扰 (例如取 2% 到 98% 之间)
+        # 这能解决“虽然有颜色但看起来全是蓝”的问题
+        vmin = np.percentile(valid_depths, 2)
+        vmax = np.percentile(valid_depths, 98)
+        
+        # 3. 归一化并截断到 [0, 255]
+        depth_clipped = np.clip(depth, vmin, vmax)
+        depth_norm = (depth_clipped - vmin) / (vmax - vmin + 1e-5) # 防止除零
+        depth_8bit = (depth_norm * 255).astype(np.uint8)
+        
+        # 4. 应用伪彩色
+        # 如果你希望“近处红、远处蓝”，用 JET；
+        # 如果希望“近处黄、远处紫”，可以尝试 COLORMAP_MAGMA
+        depth_viz_color = cv2.applyColorMap(depth_8bit, cv2.COLORMAP_JET)
+        
+        # 5. 关键：将无效区域变回黑色
+        depth_viz_color[~valid_mask] = 0
+    else:
+        depth_viz_color = np.zeros((depth.shape[0], depth.shape[1], 3), dtype=np.uint8)
+    cv2.imwrite(os.path.join(output_path, f"{os.path.splitext(img_name)[0]}_depth_viz_color.png"), depth_viz_color)
+    
     # 提取当前视角 lines
-    lines = parse_line_segments(lsd_lines_path, img_id+1, width, height).reshape(-1, 2, 2)
+    #lines = parse_line_segments(lsd_lines_path, img_id+1, width, height).reshape(-1, 2, 2)
+    lines = lsd_opencv(img)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
     lines, valid = clip_line_to_boundaries(lines, img.shape, min_len=0)
     lines = lines[valid]
+    viz_lines2D2(img, lines, output_path, f"{os.path.splitext(img_name)[0]}_lines")
     
     valid_idx_all_local = [] # 变量名微调，避免混淆
 
@@ -106,6 +175,7 @@ def process_single_view_worker(args):
         if int(nimg_id) == int(img_id): continue
         
         ncam_dict = camerasInfo[nimg_id]
+        nimg_name = ncam_dict['img_name'].split('/')[-1]
         nwidth = int(ncam_dict['width'])
         nheight = int(ncam_dict['height'])
         # 确定是.png还是.jpg
@@ -114,15 +184,48 @@ def process_single_view_worker(args):
         else:
             nimg = cv2.imread(os.path.join(images_path, ncam_dict['img_name']+'.jpg'), 0)
         
-        nlines = parse_line_segments(lsd_lines_path, nimg_id+1, nwidth, nheight).reshape(-1, 2, 2)
+        #nlines = parse_line_segments(lsd_lines_path, nimg_id+1, nwidth, nheight).reshape(-1, 2, 2)
+        nlines = lsd_opencv(nimg)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
         nlines, valid = clip_line_to_boundaries(nlines, nimg.shape, min_len=0)
         nlines = nlines[valid]
+        viz_lines2D2(nimg, nlines, output_path, f"{os.path.splitext(nimg_name)[0]}_lines")
 
         lines_proj, line_indices = views_transform_reverse(nimg, lines, ncam_dict, img, depth, cam_dict)
 
         matches = establish_line_correspondences_reverse(lines_proj, nlines, t_angle=1.0, 
                         t_dist=1.0, 
                         t_overlap=0.95)
+
+        # --- 新增：准备可视化所需的数据 ---
+        viz_pairs = []
+        valid_idx = set()
+        
+        # 解析 matches
+        for match_item in matches:
+            l_idx_proj = match_item[0]  # line_idx
+            n_idx = match_item[1]  # nline_idx
+            
+            # 将投影索引映射回原始 img 的线段索引
+            original_idx = line_indices[l_idx_proj]
+            
+            valid_idx.add(original_idx)
+            
+            # 添加到可视化列表 (src_idx, neighbor_idx)
+            viz_pairs.append((original_idx, n_idx))
+            
+        valid_idx_all_local.append(sorted(list(valid_idx)))
+
+        # --- 新增：调用可视化函数 ---
+        # 仅当有匹配时才保存，防止生成过多空图
+        if len(viz_pairs) > 0:
+            viz_name = f"{os.path.splitext(img_name)[0]}_vs_{os.path.splitext(ncam_dict['img_name'].split('/')[-1])[0]}"
+            viz_pairwise_matches(
+                img, lines,       # 左图和左图线段
+                nimg, nlines,     # 右图和右图线段
+                viz_pairs,        # 匹配对索引列表
+                os.path.join(output_path, "pairwise_viz"), # 建议存放在子文件夹
+                viz_name
+            )
 
         valid_idx = set()
         for l_idx_proj, _, _ in matches:
@@ -135,12 +238,12 @@ def process_single_view_worker(args):
     all_indices = [idx for sublist in valid_idx_all_local for idx in sublist]
     index_counts_counter = Counter(all_indices)
     
-    # 筛选至少匹配 1 次的线段 (原代码逻辑)
+    # 筛选至少匹配 3 次的线段 (原代码逻辑)
     final_valid_indices = [idx for idx, count in index_counts_counter.items() if count >= 1]
 
     # 可视化与保存
     lines_matched = lines[final_valid_indices]
-    #viz_lines2D2(img, lines_matched, output_path, f"{os.path.splitext(img_name)[0]}_matched")
+    viz_lines2D2(img, lines_matched, output_path, f"{os.path.splitext(img_name)[0]}_matched")
     
     matched_lines_path = os.path.join(output_path, 'matched_lines') # 需确保路径已创建
     save_segments_l3dpp(lines_matched.reshape(-1,4)[:,[1,0,3,2]], matched_lines_path, img_id+1, width, height)
@@ -149,7 +252,7 @@ def process_single_view_worker(args):
     return img_id, final_valid_indices
 
 # --- 修改后的主调用函数 ---
-def project_and_establish_correspondences_parallel(camerasInfo, overlap_images, reconstructed_idx_all, top3000_indices_all,
+def project_and_establish_correspondences_parallel(camerasInfo, overlap_images,
                                           lsd_lines_path, images_path, depth_path, output_path, neighbor_thred=8):
     
     matched_lines_path = os.path.join(output_path, 'matched_lines')
@@ -160,64 +263,27 @@ def project_and_establish_correspondences_parallel(camerasInfo, overlap_images, 
     # 准备任务参数列表
     tasks = []
     for img_id, nimg_ids in overlap_images.items():
-        # 这里把所有需要的参数打包
-        # 注意：camerasInfo 这种大字典在 fork 模式下（Linux默认）是写时复制的，内存开销还好
-        # 但如果很大，传递给 spawn 模式的进程会很慢
-        tasks.append((
-            img_id, nimg_ids, camerasInfo, reconstructed_idx_all, top3000_indices_all,
-            lsd_lines_path, images_path, depth_path, output_path, neighbor_thred
-        ))
-
-    # 设置并行核心数，建议留几个核心给系统，或者根据内存大小限制
-    # 假设你有 3090Ti 这种级别的机器，内存如果 >= 64GB，可以开 8-10 个
-    num_processes = min(multiprocessing.cpu_count(), 8) 
-    
-    print(f"[INFO] Starting parallel processing with {num_processes} processes...")
-
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        # 使用 imap_unordered 可以实时获取结果，配合 tqdm 显示进度
-        results = list(tqdm(pool.imap_unordered(process_single_view_worker, tasks), total=len(tasks), desc="Parallel Correspondence"))
-
-    # 汇总结果
-    print("[INFO] Aggregating results...")
-    for img_id, valid_indices in results:
-        valid_idx_images_all[img_id] = valid_indices
-
-    # 原代码返回了 index_counts，但原代码逻辑里 index_counts 是最后一次循环的局部变量
-    # 这里我们暂且忽略它，或者只返回最后处理的一个，通常 valid_idx_images_all 才是重点
-    return valid_idx_images_all
+        if img_id == 66:
+            process_single_view_worker(
+                (img_id, nimg_ids, camerasInfo,
+                lsd_lines_path, images_path, depth_path, output_path, neighbor_thred)
+            )
 
 
 if __name__ == "__main__":
     ####################################### 参数 #######################################
-    workspace = r"/home/rylynn/Pictures/datasets_3Dline/MatrixCity/block_B/"
-    overlap_percentile = 30       # 自动阈值分位数,可以简单理解为取前%为重叠航片
+    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/"  # /home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin_block1/
+    overlap_percentile = 50       # 自动阈值分位数,可以简单理解为取前%为重叠航片
 
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')
-    output_path = os.path.join(workspace, 'intermediate_results_0112')
+    output_path = os.path.join(workspace, 'intermediate_results_0201')
     line3dpp_path = os.path.join(output_path, 'lsd_lines_len3000')
 
 
     # 0. 数据准备：读取稀疏模型
     camerasInfo, points_in_images = load_sparse_model(sparse_model_path, image_scale=1)
     print(f"[INFO] Loaded {len(camerasInfo)} images.")
-
-    # 1. 读取Line3D++的重建的重建结果，记录各相片实际参与重建的线段结果，记录各相片实际参与重建的线段
-    _, _, lines2d_in_cam = parse_lines3dpp(line3dpp_path)
-    lines2d_reconstructed = {}
-    for img_id, lines2d in lines2d_in_cam.items():
-        lines2d_reconstructed[img_id] = list(lines2d.keys())
-    # 读取top3000线段的索引
-    with open(os.path.join(line3dpp_path, 'top3000_indices.json'), 'r') as f:
-        top3000_indices_all = json.load(f)
-    reconstructed_idx_all = {}
-    for img_id, top3000_indices in top3000_indices_all.items():
-        # line3dpp中的image_id从1开始，而camerasInfo中的img_id从0开始
-        line_indices = lines2d_reconstructed[int(img_id)+1]
-        reconstructed_idx = [top3000_indices[idx] for idx in line_indices]
-        reconstructed_idx_all[int(img_id)] = reconstructed_idx
-    print(f"[INFO] Parsed reconstructed lines for {len(reconstructed_idx_all)} images.")
 
 
     # 2. 所有相片寻找邻近视角
@@ -228,8 +294,8 @@ if __name__ == "__main__":
     cv2.setNumThreads(0)
     # 3. 根据邻近视角，寻找有4次及以上匹配的线段
     corres_idx_all = project_and_establish_correspondences_parallel(
-        camerasInfo, overlap_images,reconstructed_idx_all, top3000_indices_all,
-        lsd_lines_path=os.path.join(output_path, 'lsd_lines_all'),
+        camerasInfo, overlap_images,
+        lsd_lines_path=os.path.join(output_path, 'deeplsd_Dublin_H'),
         images_path=os.path.join(workspace, 'images'),
         depth_path=os.path.join(workspace, 'depth_maps'),
         output_path=output_path,

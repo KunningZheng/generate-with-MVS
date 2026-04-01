@@ -4,13 +4,13 @@ import numpy as np
 
 if __name__ == "__main__":
     ####################################### 参数 #######################################
-    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/"
+    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin_block3/sparse_txt_geo/"
     overlap_percentile = 90       # 自动阈值分位数,可以简单理解为取前%为重叠航片
 
     ####################################### 路径 #######################################
     output_path = os.path.join(workspace, 'intermediate_results_0104')
-    line3d_len3000_path = os.path.join(output_path, 'lsd_lines_len3000')
-    line3d_matched_path = os.path.join(output_path, 'lsd_lines_matched')
+    line3d_len3000_path = os.path.join(workspace, 'Line3D++_H_strict')
+    line3d_matched_path = os.path.join(workspace, 'Line3D++_H_matched_normal')
 
 
     # 1. 读取Line3D++的重建的重建结果，记录各相片实际参与重建的线段结果，记录各相片实际参与重建的线段
@@ -52,5 +52,5 @@ if __name__ == "__main__":
         print("\n")
 
     # 执行统计 (针对读取的两个结果)
-    analyze_lines_statistics("Results: Len3000", line3d_len, line3d_to_line2d_len)
-    analyze_lines_statistics("Results: Matched", line3d_matched, line3d_to_line2d_matched)
+    analyze_lines_statistics("Results: H_strict_len3000", line3d_len, line3d_to_line2d_len)
+    analyze_lines_statistics("Results: H_matched_normal_len3000", line3d_matched, line3d_to_line2d_matched)

@@ -230,90 +230,41 @@ def main():
 
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')
-    images_path=os.path.join(workspace, 'images')
-    output_path = os.path.join(workspace, 'intermediate_results_0118')
+    output_path = os.path.join(workspace, 'intermediate_results_0201')
     depthmap_orginal_path = "/media/rylynn/data/Dublin/block2/dense/stereo/depth_maps/"
     depthmap_path = os.path.join(workspace, 'depth_maps')
-    gt_images_path = os.path.join(output_path, 'gt', 'images')
-    os.makedirs(output_path, exist_ok=True)
     os.makedirs(depthmap_path, exist_ok=True)
-    os.makedirs(gt_images_path, exist_ok=True)
 
     ####################################### Step 1: 加载稀疏模型 #######################################
     camerasInfo, points_in_images = load_sparse_model(sparse_model_path, image_scale)
     print(f"[INFO] Loaded {len(camerasInfo)} images.")
 
-    json_files = [f for f in os.listdir(output_path) if f.startswith("near_image_ids_") and f.endswith(".json")]
-    # 如果存在则直接读取
-    if len(json_files)>0:
-        print(f"[INFO] near_image_ids file exists in {output_path}, skipping selection.")
-        with open(os.path.join(output_path, json_files[0]), "r") as f:
-            near_image_ids = json.load(f)
-        # 确保 key 是整数
-        near_image_ids = {int(k):v for k,v in near_image_ids.items()}
-        
-    else:
-        ####################################### Step 2: 动态阈值 #######################################
-        print("[INFO] Computing match statistics...")
-        match_counts = []
-        # 计算匹配点矩阵
-        matches_matrix,_ = match_pair(camerasInfo, points_in_images)
-        # 统计匹配点数量（剔除0）
-        match_counts = matches_matrix[matches_matrix > 0].flatten()
-        # 根据匹配点分布自适应确定阈值
-        match_point_num = int(np.percentile(match_counts, 100-overlap_percentile))  # 等效于从大到小取
-        print(f"[INFO] Adaptive match threshold = {match_point_num}")
+ 
+    print("[INFO] Computing match statistics...")
+    match_counts = []
+    # 计算匹配点矩阵
+    matches_matrix,_ = match_pair(camerasInfo, points_in_images)
+    # 统计匹配点数量（剔除0）
+    match_counts = matches_matrix[matches_matrix > 0].flatten()
+    # 根据匹配点分布自适应确定阈值
+    match_point_num = int(np.percentile(match_counts, 100-overlap_percentile))  # 等效于从大到小取
+    print(f"[INFO] Adaptive match threshold = {match_point_num}")
 
-        ####################################### Step 3: 构建重叠图 + 选取不重叠航片 #######################################
-        print("[INFO] Building overlap graph...")
-        G, overlap_images = build_overlap_graph(camerasInfo, points_in_images, match_point_num)
-        # 选取不重叠航片（最大独立集）
-        nonoverlap_ids = choose_nonoverlapping_images(G, camerasInfo)
-        print(f"[INFO] Selected {len(nonoverlap_ids)} non-overlapping images.")
+    ####################################### Step 3: 构建重叠图 + 选取不重叠航片 #######################################
+    print("[INFO] Building overlap graph...")
+    _, overlap_images = build_overlap_graph(camerasInfo, points_in_images, match_point_num)
 
-        ####################################### Step 4: 查找邻近航片 #######################################
-        _, overlap_images = match_pair(camerasInfo, points_in_images, match_point_num=match_point_num)
-        near_image_ids = {}
-        for img1_id in tqdm(nonoverlap_ids):
-            #cam_dict1 = camerasInfo[img1_id]
-            #lens1 = cam_dict1['img_name'].split('/')[0]
-            #near_images = []
-            near_images = overlap_images[img1_id]
-            '''
-            for img2_id in overlap_images.get(img1_id, []):
-                cam_dict2 = camerasInfo[img2_id]
-                lens2 = cam_dict2['img_name'].split('/')[0]
-                dist = np.linalg.norm(np.array(cam_dict1['position']) - np.array(cam_dict2['position']))
-                if dist > dist_th:
-                    continue
-                common_points = find_common_points(img1_id, img2_id, camerasInfo)
-                if common_points is None or len(common_points) < 10:
-                    continue
-                r1, r2 = compute_overlap_ratio(cam_dict1, cam_dict2, common_points)
-                # 保证两个相片的镜头相同（避免大的偏移）
-                if r1 > area_ratio_th and r2 > area_ratio_th and lens1 == lens2:
-                    near_images.append(int(img2_id))
-            '''
-            near_image_ids[img1_id] = near_images
+    ####################################### Step 5: 保存结果 #######################################
+    json_path = os.path.join(output_path, f"overlap_images.json")
+    with open(json_path, 'w') as f:
+        json.dump(overlap_images, f, indent=2)
+    print(f"[INFO] Saved near-image dictionary to {json_path}")
 
-        # 剔除少于3张邻近航片的航片
-        near_image_ids = {k:v for k,v in near_image_ids.items() if len(v) > 3}
-
-        ####################################### Step 5: 保存结果 #######################################
-        json_path = os.path.join(output_path, f"near_image_ids_{match_point_num}.json")
-        with open(json_path, 'w') as f:
-            json.dump(near_image_ids, f, indent=2)
-        print(f"[INFO] Saved near-image dictionary to {json_path}")
-
-        ####################################### Step 6: 可视化 #######################################
-        visualize_camera_distribution(camerasInfo, nonoverlap_ids, near_image_ids, output_path)
-
-        print(f"[STATS] Avg. neighbors per image: {np.mean([len(v) for v in near_image_ids.values()]):.2f}")
 
     ####################################### Step 7: 拷贝需要的depthmap到路径中 #######################################
     # 统计需要深度图的航片
     images_depth = set()
-    for id, near_images in near_image_ids.items():
+    for id, near_images in overlap_images.items():
         images_depth.add(id)
         for iid in near_images:
             images_depth.add(iid)
@@ -329,33 +280,7 @@ def main():
                 os.system(f'cp "{depth_path}" "{new_depth_path}"')
     print(f"[INFO] Copied required depth maps to {depthmap_path}")
 
-    ####################################### Step 8: 计算邻近视角的overlap_mask #######################################
-    find_vis_in_neighbor(camerasInfo, near_image_ids, depthmap_path, output_path)
 
-    with open(os.path.join(output_path, 'overlap_ration.txt'), 'r') as f:
-        lines = f.readlines()
-    overlap_ratios = {}
-    for line in lines:
-        img_id, ratio = line.strip().split()
-        overlap_ratios[int(img_id)] = float(ratio)
-    for img_id in near_image_ids:
-        img_name = camerasInfo[img_id]['img_name'].split('/')[1]
-        # 读取邻近视角overlap mask
-        overlap_mask_path = os.path.join(output_path, "overlap_mask", f"overlap_mask_{img_id}.npy")
-        overlap_mask = np.load(overlap_mask_path)
-        # 可视化mask
-        r = math.floor(overlap_ratios[img_id]*1000)
-        plt.imsave(os.path.join(output_path, 'overlap_mask_viz',f'{img_name}_ratio{r}.jpg'), overlap_mask, cmap='binary')
- 
-
-    ####################################### Step 9: 拷贝需要的images #######################################
-    for img_id in near_image_ids:
-        cam_dict = camerasInfo[img_id]
-        img_path = os.path.join(images_path, cam_dict['img_name']+'.jpg')
-        new_img_path = os.path.join(gt_images_path, cam_dict['img_name'].split('/')[1]+'.jpg')
-        if os.path.exists(img_path):
-            if not os.path.exists(new_img_path):
-                os.system(f'cp "{img_path}" "{new_img_path}"')
-    print(f"[INFO] Copied required images to {gt_images_path}")        
+      
 if __name__ == "__main__":
     main()

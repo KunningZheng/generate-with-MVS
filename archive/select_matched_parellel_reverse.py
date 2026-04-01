@@ -135,8 +135,8 @@ def process_single_view_worker(args):
         depth = read_depth(os.path.join(depth_path, cam_dict['img_name']+'.jpg.geometric.bin'))
     
     # 提取当前视角 lines
-    #lines = parse_line_segments(lsd_lines_path, img_id+1, width, height).reshape(-1, 2, 2)
-    lines = lsd_opencv(img)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
+    lines = parse_line_segments(lsd_lines_path, img_id+1, width, height).reshape(-1, 2, 2)
+    #lines = lsd_opencv(img)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
     lines, valid = clip_line_to_boundaries(lines, img.shape, min_len=0)
     lines = lines[valid]
     
@@ -155,8 +155,8 @@ def process_single_view_worker(args):
         else:
             nimg = cv2.imread(os.path.join(images_path, ncam_dict['img_name']+'.jpg'), 0)
         
-        #nlines = parse_line_segments(lsd_lines_path, nimg_id+1, nwidth, nheight).reshape(-1, 2, 2)
-        nlines = lsd_opencv(nimg)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
+        nlines = parse_line_segments(lsd_lines_path, nimg_id+1, nwidth, nheight).reshape(-1, 2, 2)
+        #nlines = lsd_opencv(nimg)[:, [1, 0, 3, 2]].reshape(-1, 2, 2)
         nlines, valid = clip_line_to_boundaries(nlines, nimg.shape, min_len=0)
         nlines = nlines[valid]
 
@@ -165,37 +165,6 @@ def process_single_view_worker(args):
         matches = establish_line_correspondences_reverse(lines_proj, nlines, t_angle=1.0, 
                         t_dist=1.0, 
                         t_overlap=0.95)
-
-        # --- 新增：准备可视化所需的数据 ---
-        viz_pairs = []
-        valid_idx = set()
-        
-        # 解析 matches
-        for match_item in matches:
-            l_idx_proj = match_item[0]  # line_idx
-            n_idx = match_item[1]  # nline_idx
-            
-            # 将投影索引映射回原始 img 的线段索引
-            original_idx = line_indices[l_idx_proj]
-            
-            valid_idx.add(original_idx)
-            
-            # 添加到可视化列表 (src_idx, neighbor_idx)
-            viz_pairs.append((original_idx, n_idx))
-            
-        valid_idx_all_local.append(sorted(list(valid_idx)))
-
-        # --- 新增：调用可视化函数 ---
-        # 仅当有匹配时才保存，防止生成过多空图
-        if len(viz_pairs) > 0:
-            viz_name = f"{os.path.splitext(img_name)[0]}_vs_{os.path.splitext(ncam_dict['img_name'].split('/')[-1])[0]}"
-            viz_pairwise_matches(
-                img, lines,       # 左图和左图线段
-                nimg, nlines,     # 右图和右图线段
-                viz_pairs,        # 匹配对索引列表
-                os.path.join(output_path, "pairwise_viz"), # 建议存放在子文件夹
-                viz_name
-            )
 
         valid_idx = set()
         for l_idx_proj, _, _ in matches:
@@ -208,7 +177,7 @@ def process_single_view_worker(args):
     all_indices = [idx for sublist in valid_idx_all_local for idx in sublist]
     index_counts_counter = Counter(all_indices)
     
-    # 筛选至少匹配 3 次的线段 (原代码逻辑)
+    # 筛选至少匹配 1 次的线段 (原代码逻辑)
     final_valid_indices = [idx for idx, count in index_counts_counter.items() if count >= 1]
 
     # 可视化与保存
@@ -243,7 +212,7 @@ def project_and_establish_correspondences_parallel(camerasInfo, overlap_images,
 
     # 设置并行核心数，建议留几个核心给系统，或者根据内存大小限制
     # 假设你有 3090Ti 这种级别的机器，内存如果 >= 64GB，可以开 8-10 个
-    num_processes = max(1, 1) #multiprocessing.cpu_count() - 4
+    num_processes = max(1, multiprocessing.cpu_count() - 4)
     
     print(f"[INFO] Starting parallel processing with {num_processes} processes...")
 
@@ -263,12 +232,12 @@ def project_and_establish_correspondences_parallel(camerasInfo, overlap_images,
 
 if __name__ == "__main__":
     ####################################### 参数 #######################################
-    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin/block2/"  # /home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin_block1/
+    workspace = r"/home/rylynn/Pictures/LinesDetection_Workspace/datasets/Dublin_block1/" 
     overlap_percentile = 50       # 自动阈值分位数,可以简单理解为取前%为重叠航片
 
     ####################################### 路径 #######################################
     sparse_model_path = os.path.join(workspace, 'sparse')
-    output_path = os.path.join(workspace, 'intermediate_results_0201')
+    output_path = os.path.join(workspace, 'intermediate_results_0207')
     line3dpp_path = os.path.join(output_path, 'lsd_lines_len3000')
 
 
